@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"fmt"
 	"go/ast"
 	"regexp"
 	"strings"
@@ -43,12 +44,48 @@ func run(pass *analysis.Pass) (interface{}, error) {
 		pathSlice := strings.Split(path, "/")[1:]
 		packageName := pathSlice[len(pathSlice)-1]
 
-		if !checkVersion(aliasSlice[len(aliasSlice)-1], packageName) {
-			pass.Reportf(node.Pos(), "version not specified in alias. path: %s alias: %s version %s", path, alias, packageName)
+		if !checkVersion(aliasSlice[len(aliasSlice)-1], pathSlice) {
+			applicableAlias := getAliasFix(pathSlice)
+			pass.Report(
+				analysis.Diagnostic{
+					Pos:     node.Pos(),
+					Message: fmt.Sprintf("version not specified in alias. path: %s alias: %s version %s", path, alias, packageName),
+					SuggestedFixes: []analysis.SuggestedFix{
+						{
+							Message: fmt.Sprintf("should replace %q with %q", alias, applicableAlias),
+							TextEdits: []analysis.TextEdit{
+								{
+									Pos:     importStmt.Pos(),
+									End:     importStmt.Name.End(),
+									NewText: []byte(applicableAlias),
+								},
+							},
+						},
+					},
+				},
+			)
 			return
 		}
 		if ok, lintErrMsg := checkAliasName(aliasSlice, pathSlice, pass); !ok {
-			pass.Reportf(node.Pos(), lintErrMsg+" path: %s alias: %s", path, alias)
+			applicableAlias := getAliasFix(pathSlice)
+			pass.Report(
+				analysis.Diagnostic{
+					Pos:     node.Pos(),
+					Message: fmt.Sprintf(lintErrMsg+" path: %s alias: %s", path, alias),
+					SuggestedFixes: []analysis.SuggestedFix{
+						{
+							Message: fmt.Sprintf("should replace %q with %q", alias, applicableAlias),
+							TextEdits: []analysis.TextEdit{
+								{
+									Pos:     importStmt.Pos(),
+									End:     importStmt.Name.End(),
+									NewText: []byte(applicableAlias),
+								},
+							},
+						},
+					},
+				},
+			)
 			return
 		}
 	})
@@ -56,11 +93,12 @@ func run(pass *analysis.Pass) (interface{}, error) {
 }
 
 // checkVersion checks that if package name starts with `v` it's included in alias name
-func checkVersion(aliasLastWord string, packageName string) bool {
-	if hasVPrefix := strings.HasPrefix(packageName, "v"); !hasVPrefix {
+func checkVersion(aliasLastWord string, pathSlice []string) bool {
+	versionExists, versionPos := packageVersion(pathSlice)
+	if !versionExists {
 		return true
 	}
-	return aliasLastWord == packageName
+	return aliasLastWord == pathSlice[versionPos]
 
 }
 
@@ -90,6 +128,30 @@ func checkAliasName(aliasSlice []string, pathSlice []string, pass *analysis.Pass
 	}
 
 	return true, ""
+}
+
+func getAliasFix(pathSlice []string) string {
+	versionExists, versionPos := packageVersion(pathSlice)
+	if !versionExists {
+		return pathSlice[len(pathSlice)-1]
+	}
+	if versionPos == len(pathSlice)-1 {
+		applicableAlias := pathSlice[len(pathSlice)-2] + "_" + pathSlice[versionPos]
+		return applicableAlias
+	}
+
+	applicableAlias := pathSlice[len(pathSlice)-1] + "_" + pathSlice[versionPos]
+	return applicableAlias
+}
+
+// packageVersion returns if some version specification exists in import path and it's position
+func packageVersion(pathSlice []string) (bool, int) {
+	for pos, value := range pathSlice {
+		if strings.HasPrefix(value, "v") {
+			return true, pos
+		}
+	}
+	return false, 0
 }
 
 func searchString(slice []string, word string) int {
